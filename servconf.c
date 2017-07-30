@@ -11,6 +11,7 @@
  * called by a name other than "ssh" or "Secure Shell".
  */
 
+
 #include "includes.h"
 
 #include <sys/types.h>
@@ -61,6 +62,8 @@ static void add_one_listen_addr(ServerOptions *, char *, int);
 /* Use of privilege separation or not */
 extern int use_privsep;
 extern Buffer cfg;
+
+/* extern double* AuthTimeThreshold; //認証時間しきい値格納用変数 */
 
 /* Initializes the server options to their default values. */
 
@@ -153,6 +156,7 @@ initialize_server_options(ServerOptions *options)
 	options->ip_qos_interactive = -1;
 	options->ip_qos_bulk = -1;
 	options->version_addendum = NULL;
+	options->auth_time_threshold = 0.0; /* 認証時間しきい値 */
 }
 
 void
@@ -303,6 +307,8 @@ fill_default_server_options(ServerOptions *options)
 	/* Turn privilege separation on by default */
 	if (use_privsep == -1)
 		use_privsep = PRIVSEP_NOSANDBOX;
+	if (options->auth_time_threshold == 0.0)  // 認証時間しきい値のデフォルト値設定
+		options->auth_time_threshold = DEFAULT_AUTH_TIME_THRESHOLD;
 
 #ifndef HAVE_MMAP
 	if (use_privsep && options->compression == 1) {
@@ -348,7 +354,8 @@ typedef enum {
 	sKexAlgorithms, sIPQoS, sVersionAddendum,
 	sAuthorizedKeysCommand, sAuthorizedKeysCommandUser,
 	sAuthenticationMethods, sHostKeyAgent,
-	sDeprecated, sUnsupported
+	sDeprecated, sUnsupported,
+	sAuthTimeThreshold /* 認証時間しきい値用トークン */
 } ServerOpCodes;
 
 #define SSHCFG_GLOBAL	0x01	/* allowed in main section of sshd_config */
@@ -474,6 +481,7 @@ static struct {
 	{ "authorizedkeyscommanduser", sAuthorizedKeysCommandUser, SSHCFG_ALL },
 	{ "versionaddendum", sVersionAddendum, SSHCFG_GLOBAL },
 	{ "authenticationmethods", sAuthenticationMethods, SSHCFG_ALL },
+    { "authtimethreshold", sAuthTimeThreshold, SSHCFG_GLOBAL}, /* 認証時間しきい値用 */
 	{ NULL, sBadOption, 0 }
 };
 
@@ -487,6 +495,8 @@ static struct {
 	{ SSH_TUNMODE_YES, "yes" },
 	{ -1, NULL }
 };
+
+
 
 /*
  * Returns the number of the token pointed to by cp or sBadOption.
@@ -828,6 +838,7 @@ process_server_config_line(ServerOptions *options, char *line,
 {
 	char *cp, **charptr, *arg, *p;
 	int cmdline = 0, *intptr, value, value2, n, port;
+    double threshold;
 	SyslogFacility *log_facility_ptr;
 	LogLevel *log_level_ptr;
 	ServerOpCodes opcode;
@@ -919,6 +930,11 @@ process_server_config_line(ServerOptions *options, char *line,
 		if (*intptr == -1)
 			*intptr = value;
 		break;
+
+	case sAuthTimeThreshold: // confから読み込んだ数値のポインタを変数に代入
+        arg = strdelim(&cp);
+        AuthTimeThreshold = atof(arg);
+        break;
 
 	case sKeyRegenerationTime:
 		intptr = &options->key_regeneration_time;

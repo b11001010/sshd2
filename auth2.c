@@ -49,6 +49,14 @@
 #include "dispatch.h"
 #include "pathnames.h"
 #include "buffer.h"
+#include <stdio.h>
+#include "stdlib.h"
+
+#include <sys/time.h> //
+#include <time.h>     // AuthInfo用
+//#include "servconf.h"   //
+#include "canohost.h" //
+
 
 #ifdef GSSAPI
 #include "ssh-gss.h"
@@ -98,6 +106,22 @@ static char *authmethods_get(Authctxt *authctxt);
 #define MATCH_BOTH	2	/* method and submethod match */
 #define MATCH_PARTIAL	3	/* method matches, submethod can't be checked */
 static int list_starts_with(const char *, const char *, const char *);
+
+struct timeval s; //パスワード入力開始時間を格納
+struct timeval s2; //1コネクションで複数回の試行があった場合はこの変数に開始時間を格納
+int MULTIPLE_AUTH = 0;
+char *USER; //AuthInfoのユーザ名用変数
+double AuthTimeThreshold;
+
+//#define HPING_BUF 256
+//char HPING_RTT[10];
+//double HPING_RTT_DOUBLE;
+
+//鍵交換時のRTTが格納される変数
+double KEXINIT_TIME;
+extern double KEXINIT_TIME;
+double NEWKEYS_TIME;
+extern double NEWKEYS_TIME;
 
 char *
 auth2_read_banner(void)
@@ -183,6 +207,14 @@ input_service_request(int type, u_int32_t seq, void *ctxt)
 	int acceptit = 0;
 	char *service = packet_get_cstring(&len);
 	packet_check_eom();
+    //FILE *hping_fp;
+    //char hbuf[HPING_BUF];
+    //memset(hbuf,NULL,HPING_BUF);
+    //char hping_command[100] = "python /home/uehara/Research/python/wrap_hping.py ";
+
+
+    //debug("in auth2.c NEWKEYS_TIME = %lf",NEWKEYS_TIME);
+    //debug("in auth2.c KEXINIT_TIME = %lf",KEXINIT_TIME);
 
 	if (authctxt == NULL)
 		fatal("input_service_request: no authctxt");
@@ -201,6 +233,22 @@ input_service_request(int type, u_int32_t seq, void *ctxt)
 		packet_put_cstring(service);
 		packet_send();
 		packet_write_wait();
+
+
+        //strcat(hping_command,get_remote_ipaddr());
+        //char *hping_cmd = &hping_command;
+        //hping_fp = popen(hping_cmd,"r");
+        //fgets(hbuf,HPING_BUF,hping_fp);
+		//strtok(hbuf,"\n\0"); //hping3の実行結果から改行文字を取り除く
+        //strcpy(HPING_RTT,hbuf);
+        //HPING_RTT_DOUBLE = atof(HPING_RTT); //hpingの実行結果(RTT)を文字列から数値に変換
+        //HPING_RTT_DOUBLE = HPING_RTT_DOUBLE * 0.001; //hpingの実行結果(RTT)をミリ秒から普通の秒単位に変換
+
+
+	    gettimeofday(&s, NULL); //認証開始時間
+        //認証開始時間はnoneメソッドを送信するツールに対してはuserauth_finish関数内のものを，そうでないものはここで取得しているものが認証開始時間となる
+
+
 	} else {
 		debug("bad service request %s", service);
 		packet_disconnect("bad service request %s", service);
@@ -225,6 +273,8 @@ input_userauth_request(int type, u_int32_t seq, void *ctxt)
 	method = packet_get_cstring(NULL);
 	debug("userauth-request for user %s service %s method %s", user, service, method);
 	debug("attempt %d failures %d", authctxt->attempt, authctxt->failures);
+
+    USER = user; //AuthInfo用にユーザ名をグローバル変数に格納
 
 	if ((style = strchr(user, ':')) != NULL)
 		*style++ = 0;
@@ -292,8 +342,14 @@ userauth_finish(Authctxt *authctxt, int authenticated, const char *method,
     const char *submethod)
 {
 	char *methods;
-	int partial = 0;
-
+	int partial = 0;	
+	struct timeval e;
+    double authtime;
+    /* double AuthTimeThreshold = 0.2044475; */
+    char detection[10];
+	//char *password = "password";
+    struct tm *time_st;
+	
 	if (!authctxt->valid && authenticated)
 		fatal("INTERNAL ERROR: authenticated invalid user %s",
 		    authctxt->user);
@@ -352,7 +408,84 @@ userauth_finish(Authctxt *authctxt, int authenticated, const char *method,
 		packet_write_wait();
 		/* now we can break out */
 		authctxt->success = 1;
+
+
+		gettimeofday(&e, NULL);
+        time_st = localtime(&e.tv_sec); //現在時刻を現地化
+
+		//コネクション中の最初の認証のみ開始時間をinput_service_request関数内のs，それ以降はuserauth_finish関数内のs2とする
+		if(MULTIPLE_AUTH == 0){
+			authtime = (e.tv_sec - s.tv_sec) + (e.tv_usec - s.tv_usec) * 1.0E-6;
+		}else{
+			authtime = (e.tv_sec - s2.tv_sec) + (e.tv_usec - s2.tv_usec) * 1.0E-6;
+		}
+
+
+		if (authtime < AuthTimeThreshold) {
+			strcpy(detection, "Attack");
+		} else {
+			strcpy(detection, "Normal");
+		}
+
+        logit("[Auth:Success,User:%s,IP:%s,Time:%lf,Detect:%s,RTT:%06lf,Year:%d,Month:%02d,Day:%02d,Hour:%02d,Minute:%02d,Second:%02d,MicroSec:%06d]KEXINIT:%lf,NEWKEYS:%lf",
+              USER,
+              get_remote_ipaddr(),
+              authtime,
+              detection,
+              ((KEXINIT_TIME + NEWKEYS_TIME)/2),
+              time_st->tm_year+1900,
+              time_st->tm_mon+1,
+              time_st->tm_mday,
+              time_st->tm_hour,
+              time_st->tm_min,
+              time_st->tm_sec,
+              e.tv_usec,
+              KEXINIT_TIME,
+              NEWKEYS_TIME
+        );
+
+
 	} else {
+
+        if(strcmp(method,"password") == 0) { /* password認証前のnone，公開鍵認証の失敗は無視 */
+            gettimeofday(&e, NULL); //認証終了時間
+            time_st = localtime(&e.tv_sec); //現在時刻を現地化
+
+		//コネクション中の最初の認証のみ開始時間をinput_service_request関数内のs，それ以降はuserauth_finish関数内のs2とする
+            if (MULTIPLE_AUTH == 0){
+                authtime = (e.tv_sec - s.tv_sec) + (e.tv_usec - s.tv_usec) * 1.0E-6;
+                //logit("in 0");
+            }else{
+                authtime = (e.tv_sec - s2.tv_sec) + (e.tv_usec - s2.tv_usec) * 1.0E-6;
+                //logit("in 1");
+            }
+
+
+            if (authtime < AuthTimeThreshold) {
+				strcpy(detection, "Attack");
+			} else {
+				strcpy(detection, "Normal");
+			}
+
+
+			logit("[Auth:Fail,User:%s,IP:%s,Time:%lf,Detect:%s,RTT:%06lf,Year:%d,Month:%02d,Day:%02d,Hour:%02d,Minute:%02d,Second:%02d,MicroSec:%06d]KEXINIT:%lf,NEWKEYS:%lf",
+				  USER,
+				  get_remote_ipaddr(),
+				  authtime,
+				  detection,
+                  ((KEXINIT_TIME + NEWKEYS_TIME)/2),
+                  time_st->tm_year+1900,
+                  time_st->tm_mon+1,
+                  time_st->tm_mday,
+                  time_st->tm_hour,
+                  time_st->tm_min,
+                  time_st->tm_sec,
+                  e.tv_usec,
+                  KEXINIT_TIME,
+                  NEWKEYS_TIME
+			);
+
+		}
 
 		/* Allow initial try of "none" auth without failure penalty */
 		if (!authctxt->server_caused_failure &&
@@ -373,6 +506,21 @@ userauth_finish(Authctxt *authctxt, int authenticated, const char *method,
 		packet_send();
 		packet_write_wait();
 		free(methods);
+
+        //logit("%s",method);
+
+		if(strcmp(method,"password") == 0) { //2回目以降の認証試行時に実行される
+			MULTIPLE_AUTH = 1;
+			gettimeofday(&s2, NULL);
+			//logit("received password method.");
+		}
+
+        if(strcmp(method,"none") == 0) { //最初の認証試行時に実行される
+            gettimeofday(&s, NULL);
+            //logit("received none method. started userauth. ");
+        }
+
+
 	}
 }
 
